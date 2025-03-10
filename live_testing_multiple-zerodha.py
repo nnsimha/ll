@@ -1,11 +1,17 @@
 import kiteapp as kt
 import pandas as pd
-import time
 from datetime import datetime, timedelta
 import logging
 from tabulate import tabulate
-import pdb
 from instrument_config import instruments, trade_config
+import threading
+from time import sleep
+import signal
+import sys
+
+# Constants
+INTERVAL = "2minute"
+DURATION = 3  # Duration for each sleep cycle in seconds
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
@@ -20,10 +26,32 @@ with open('enctoken.txt', 'r') as rd:
 kite = kt.KiteApp("kite", "YQ6639", token)
 logging.info("Kite API initialized successfully")
 
-# WebSocket instance (not used in this script, but initialized)
-kws = kite.kws()
+# Initialize Kite Ticker
+kws = kite.kws()  # For Websocket
 
-interval = "2minute"
+live_data = {}
+
+def on_ticks(ws, ticks):
+    for tick in ticks:
+        live_data[tick['instrument_token']] = {
+            "ltp": tick["last_price"],
+            "high": tick["ohlc"]["high"],
+            "low": tick["ohlc"]["low"]
+        }
+    logging.info("Ticks received")
+
+def on_connect(ws, response):
+    ws.subscribe([instrument["token"] for instrument in instruments])
+    ws.set_mode(ws.MODE_QUOTE, [instrument["token"] for instrument in instruments])
+    logging.info("WebSocket connected and subscribed to instruments")
+
+def on_close(ws, code, reason):
+    ws.stop()
+    logging.info("WebSocket closed")
+
+kws.on_ticks = on_ticks
+kws.on_connect = on_connect
+kws.on_close = on_close
 
 def has_active_sell_order(symbol):
     """Check if there's an active SELL order for the given symbol."""
@@ -58,9 +86,9 @@ def fetch_historical_data(instrument):
             instrument_token=instrument["token"],
             from_date=from_date,
             to_date=to_date,
-            interval=interval
+            interval=INTERVAL
         )
-        
+
         df = pd.DataFrame(data)
         if df.empty:
             logging.warning(f"No data available for {instrument['symbol']}. Market might be closed.")
@@ -71,7 +99,7 @@ def fetch_historical_data(instrument):
         return None
 
 def calculate_moving_averages(df):
-    """Calculate 20MA and 50MA for the stock."""
+    """Calculate 20MA, 50MA, and Bollinger Bands for the stock."""
     if "close" not in df.columns:
         raise KeyError("Column 'close' is missing from DataFrame. Check the API response.")
 
@@ -80,11 +108,15 @@ def calculate_moving_averages(df):
     df["std_dev"] = df["close"].rolling(window=20).std()
     df["Upper_BB"] = df["20MA"] + (df["std_dev"] * 2)
     df["Lower_BB"] = df["20MA"] - (2 * df["std_dev"])
-   
+
     return df
 
 def check_trade_condition(instrument):
     """Check trade conditions for a given instrument and place a SELL order if conditions are met."""
+    if instrument["token"] not in live_data:
+        logging.warning(f"No live data available for {instrument['symbol']}")
+        return
+
     df = fetch_historical_data(instrument)
     if df is None:
         return
@@ -92,13 +124,13 @@ def check_trade_condition(instrument):
     df = calculate_moving_averages(df)
 
     latest_candle = df.iloc[-1]
-    close_price = latest_candle["close"]
+    close_price = live_data[instrument["token"]]["ltp"]
     low_price = latest_candle["low"]
     ma_50 = df["50MA"].dropna().iloc[-1] if not df["50MA"].dropna().empty else None
     lower_bb = latest_candle["Lower_BB"]
-    
+
     logging.info(f"{instrument['symbol']} - Latest Close: {close_price}, 50MA: {ma_50}, Lower BB: {lower_bb}")
-    
+
     if close_price < ma_50 or close_price <= lower_bb:
         if has_active_sell_order(instrument["symbol"]):
             logging.info(f"Skipping SELL order for {instrument['symbol']} as an active order exists.")
@@ -117,7 +149,7 @@ def place_sell_order(instrument, ltp):
         quantity = config["quantity"]
         stop_loss = round(ltp + sl_buffer, 2)
         target = round(ltp - target_buffer, 2)
-        
+
         order_id = kite.place_order(
             variety="regular",
             exchange=instrument["exchange"],
@@ -125,14 +157,14 @@ def place_sell_order(instrument, ltp):
             transaction_type="SELL",
             quantity=quantity,
             product="MIS",
-            order_type="LIMIT",
+            order_type="MARKET",
             price=ltp,
             validity="DAY"
         )
         logging.info(f"✅ SELL Order placed successfully for {instrument['symbol']}! Order ID: {order_id}")
 
         # Wait for order execution before placing SL and Target orders
-        time.sleep(2)
+        sleep(2)
         orders = kite.orders()
 
         for order in orders:
@@ -167,11 +199,27 @@ def place_sell_order(instrument, ltp):
     except Exception as e:
         logging.error(f"Error placing SELL order for {instrument['symbol']}: {e}")
 
-# Main loop (Runs every 5 minutes)
-duration = 300
-while True:
-    logging.info("Starting new cycle")
-    for instrument in instruments:
-        check_trade_condition(instrument)
-    logging.info(f"Sleeping for {duration} seconds...\n")
-    time.sleep(duration)
+def signal_handler(sig, frame):
+    logging.info("Interrupt received, stopping...")
+    kws.stop()
+    sys.exit(0)
+
+# Register the signal handler
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# Start WebSocket in the main thread
+ws_thread = threading.Thread(target=kws.connect)
+ws_thread.daemon = True
+ws_thread.start()
+
+try:
+    # Main loop (Runs continuously)
+    while True:
+        logging.info("Starting new cycle")
+        for instrument in instruments:
+            check_trade_condition(instrument)
+        logging.info(f"Sleeping for {DURATION} seconds...\n")
+        sleep(DURATION)
+except (KeyboardInterrupt, SystemExit):
+    signal_handler(None, None)

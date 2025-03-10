@@ -1,0 +1,19 @@
+# List of multiple instruments
+instruments = [
+    {"token": 871681, "symbol": "TATACHEM", "exchange": "NSE"},
+    {"token": 5195009, "symbol": "TATATECH", "exchange": "NSE"},
+    {"token": 492033, "symbol": "KOTAKBANK", "exchange": "NSE"},
+    {"token": 113109255, "symbol": "NATURALGAS25APRFUT", "exchange": "MCX"},
+    {"token": 112596231, "symbol": "CRUDEOIL25MARFUT", "exchange": "MCX"},
+    {"token": 110560263, "symbol": "GOLD25APRFUT", "exchange": "MCX"},
+]
+
+# Trade configuration for each instrument
+trade_config = {
+    "TATACHEM": {"sl_buffer": 1, "target_buffer": 3, "quantity": 1000},
+    "TATATECH": {"sl_buffer": 1, "target_buffer": 3, "quantity": 2},
+    "KOTAKBANK": {"sl_buffer": 4, "target_buffer": 8, "quantity": 2},
+    "NATURALGAS25APRFUT": {"sl_buffer": 5, "target_buffer": 10, "quantity": 5},
+    "CRUDEOIL25MARFUT": {"sl_buffer": 30, "target_buffer": 60, "quantity": 5},
+    "GOLD25APRFUT": {"sl_buffer": 50, "target_buffer": 100, "quantity": 1},
+}
